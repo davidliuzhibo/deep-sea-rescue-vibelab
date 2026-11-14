@@ -1,5 +1,7 @@
 package com.vrgames.deeprescue.ui.rescue
 
+import kotlin.math.abs
+
 import android.os.SystemClock
 import android.util.Log
 import androidx.compose.foundation.layout.Box
@@ -88,16 +90,33 @@ import kotlinx.coroutines.isActive
                 for(event in events){val native=scene?:continue
                     if(!latest.foreground||!latest.ready||!latest.trackingValid)continue
                     val p=V3(event.x.toDouble(),event.y.toDouble(),event.z.toDouble())
+                    // The finger pointing, not pinching, at a console control: a short card says what it is for.
+                    if(owner==null&&!event.pressed&&!event.isUpEvent()&&!event.isDownEvent()){
+                        val id=native.target(event.targetedEntity)
+                        val name=when{id=="handle"->"handle";id?.startsWith("ctl.")==true->id.removePrefix("ctl.");else->null}
+                        if(name!=null){val (t,b)=com.vrgames.deeprescue.domain.ConsoleGuide.card(name,latest.progress.phase);native.pointAt(name,t,b)}
+                        continue}
                     if(event.isDownEvent()&&owner==null){val id=native.target(event.targetedEntity)
-                        if(id!=null){owner=event.pointerId.value;target=id;start=p;dragging=false;consumed=true}}
+                        if(id!=null){owner=event.pointerId.value;target=id;start=p;dragging=false;consumed=true
+                            // The card also comes with a pinch, in case the system sends no pointing-only events.
+                            val name=when{id=="handle"->"handle";id.startsWith("ctl.")->id.removePrefix("ctl.");else->null}
+                            if(name!=null){native.held=name;val (t,b)=com.vrgames.deeprescue.domain.ConsoleGuide.card(name,latest.progress.phase);native.pointAt(name,t,b)}}}
+                    // Console controls: a press, or pushes of a knob (up +, down -) or a lever (right +, left -), a step
+                    // per 4 cm. The levers go sideways: an upward push was hard for the headset to read (2026-11-13).
+                    if(owner==event.pointerId.value&&target?.startsWith("ctl.")==true){consumed=true
+                        val name=target!!.removePrefix("ctl.");val d=physical(p-start)
+                        val amount=if(com.vrgames.deeprescue.domain.ConsoleGuide.sideways(name))d.x else d.y
+                        if(event.pressed&&abs(amount)>=.04){val step=if(amount>0)1 else -1;vm.onEvent(RescueEvent.Physical(name,step));start=p;dragging=true}
+                        if(event.isUpEvent()||!event.pressed){if(!dragging&&event.isUpEvent())vm.onEvent(RescueEvent.Physical(name,1));owner=null;target=null;dragging=false;native.held=null}
+                        continue}
                     if(owner==event.pointerId.value){consumed=true;val delta=native.deltaFromRoot(physical(p-start))
                         if(target=="handle"&&!dragging&&event.pressed&&delta.length()>.009)dragging=vm.onEvent(RescueEvent.DragStart(owner!!))
                         if(dragging&&(event.pressed||event.isUpEvent()))vm.onEvent(RescueEvent.DragMove(owner!!,delta))
-                        if(event.isUpEvent()){if(dragging)vm.onEvent(RescueEvent.DragEnd(owner!!,false))else if(target!="handle")target?.let{vm.onEvent(RescueEvent.SelectTarget(it))};owner=null;target=null;dragging=false}
-                        else if(!event.pressed){owner?.let{vm.onEvent(RescueEvent.DragEnd(it,true))};owner=null;target=null;dragging=false}
+                        if(event.isUpEvent()){if(dragging)vm.onEvent(RescueEvent.DragEnd(owner!!,false))else if(target!="handle")target?.let{vm.onEvent(RescueEvent.SelectTarget(it))};owner=null;target=null;dragging=false;native.held=null}
+                        else if(!event.pressed){owner?.let{vm.onEvent(RescueEvent.DragEnd(it,true))};owner=null;target=null;dragging=false;native.held=null}
                     }
                 };consumed
-            })}finally{owner?.let{vm.onEvent(RescueEvent.DragEnd(it,true))};vm.onEvent(RescueEvent.CancelInput)}
+            })}finally{owner?.let{vm.onEvent(RescueEvent.DragEnd(it,true))};vm.onEvent(RescueEvent.CancelInput);scene?.held=null}
         },attachments={AttachmentPanel(id="controls"){
         val panelRead=androidx.compose.runtime.remember(panelTick){{key:String->vm.binding(key)}}
             Box(Modifier.size(820.dp,660.dp)){RescuePanel(contract,state.page,panelRead){vm.onEvent(RescueEvent.Control(it,contract))}}

@@ -163,8 +163,23 @@ class RescueViewModel(private val repository:RescueRepository, private val write
             is RescueEvent.SelectTarget->{engine.go(event.id);publish();true}
             is RescueEvent.DragStart->engine.dragBegin(event.pointer)
             is RescueEvent.DragMove->{engine.dragMove(event.pointer,event.total);true}
+            is RescueEvent.Physical->{physical(event.name,event.delta);true}
             else->false
         }
+    }
+    /** What a console control does in the current step. */
+    private fun physical(name:String,d:Int){
+        val lift=engine.progress.phase==com.vrgames.deeprescue.domain.model.RescuePhase.BALANCE_LIFT
+        when(name){
+            "go"->if(lift)engine.lockCage() else engine.execute()
+            "stop"->engine.brake()
+            "dial"->engine.dial(d)
+            "air"->if(lift)engine.bagAir("left",d) else engine.air(d)
+            "air2"->engine.bagAir("right",d)
+            "winch"->if(lift)engine.liftCage(d) else engine.reel(d)
+            "steer"->if(lift)engine.parkCage(d) else engine.steer(d)
+        }
+        syncPhase();publish()
     }
     fun pendingSave()=writer.pending()
     private fun save(){writer.save(engine.progress).whenComplete{_,error->

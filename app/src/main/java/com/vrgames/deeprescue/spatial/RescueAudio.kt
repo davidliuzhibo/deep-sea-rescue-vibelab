@@ -13,6 +13,8 @@ class RescueAudio(context:Context) {
     private val pool=SoundPool.Builder().setMaxStreams(4).setAudioAttributes(attributes).build()
     private val ids=mutableMapOf<String,Int>();private val loaded=mutableSetOf<Int>();private val streams=mutableListOf<Int>()
     private var music:MediaPlayer?=null
+    /** The score over the sea's hum (2026-11-12 review: add music). CC0, see docs/素材来源. */
+    private var score:MediaPlayer?=null;private var scorePrepared=false
     private var settings=AudioSettings();private var active=false;private var prepared=false;private var closed=false
     init {
         pool.setOnLoadCompleteListener { _,id,status->if(status==0)loaded+=id else Log.w("DeepSeaRescue","SFX load failed id=$id status=$status") }
@@ -24,9 +26,19 @@ class RescueAudio(context:Context) {
             context.assets.openFd("audio/marine-ambience.wav").use{player.setDataSource(it.fileDescriptor,it.startOffset,it.length)}
             player.setOnPreparedListener{prepared=true;apply()};player.setOnErrorListener{_,what,extra->prepared=false;Log.w("DeepSeaRescue","Music error $what/$extra");true};player.prepareAsync()
         }catch(e:Exception){Log.w("DeepSeaRescue","Music unavailable",e)}
+        try {
+            val player=MediaPlayer();score=player;player.setAudioAttributes(attributes);player.isLooping=true;player.setVolume(.3f,.3f)
+            context.assets.openFd("audio/music.ogg").use{player.setDataSource(it.fileDescriptor,it.startOffset,it.length)}
+            player.setOnPreparedListener{scorePrepared=true;apply()};player.setOnErrorListener{_,what,extra->scorePrepared=false;Log.w("DeepSeaRescue","Score error $what/$extra");true};player.prepareAsync()
+        }catch(e:Exception){Log.w("DeepSeaRescue","Score unavailable",e)}
     }
     fun update(value:AudioSettings,foreground:Boolean) {settings=value;active=foreground;apply();if(!active||!settings.sfx){streams.forEach{pool.stop(it)};streams.clear()}}
-    private fun apply(){if(closed||!prepared)return;runCatching{if(active&&settings.music){if(music?.isPlaying!=true)music?.start()}else if(music?.isPlaying==true)music?.pause()}}
+    private fun apply(){
+        if(closed)return
+        val on=active&&settings.music
+        if(prepared)runCatching{if(on){if(music?.isPlaying!=true)music?.start()}else if(music?.isPlaying==true)music?.pause()}
+        if(scorePrepared)runCatching{if(on){if(score?.isPlaying!=true)score?.start()}else if(score?.isPlaying==true)score?.pause()}
+    }
     fun effect(name:String) {if(closed||!active||!settings.sfx)return;val id=ids[name]?:return;if(id !in loaded)return;val stream=pool.play(id,.18f,.18f,1,0,1f);if(stream!=0){streams+=stream;while(streams.size>16)streams.removeAt(0)}}
-    fun close(){if(closed)return;closed=true;active=false;streams.forEach{pool.stop(it)};pool.release();music?.release();music=null}
+    fun close(){if(closed)return;closed=true;active=false;streams.forEach{pool.stop(it)};pool.release();music?.release();music=null;score?.release();score=null}
 }

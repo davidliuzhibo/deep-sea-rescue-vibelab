@@ -124,6 +124,10 @@ class RescueScene {
         clone("reef",ocean)
         models["beam"]=clone("beam",ocean).at(V3(.205,.09,-.66))
         turtle=group("TurtleActor");ocean.addChild(turtle);val hero=clone("turtle",turtle);models["harness"]=clone("harness",turtle)
+        // The model carries a 2 m helper sphere round the body (2026-11-12 review: the turtle's "skin"
+        // looked wrong): hide it, the body and its rig stay as they are.
+        fun hideHelpers(e:Entity){if(e.getName().contains("Icosphere",true)){e.enabled=false;return};e.getChildren().forEach{hideHelpers(it)}}
+        hideHelpers(hero)
         val playable=hero.findSkeletonRootEntity(true).ifEmpty{hero.findSkinnedMeshEntity(true)}
         for(e in playable){val anim=e.getAnimationResources().firstOrNull()?:continue;keep(anim);animation+=e.playAnimation(anim).also{it.pause()}}
         check(animation.isNotEmpty()){ "The turtle has no playable skeletal animation" }
@@ -143,8 +147,10 @@ class RescueScene {
         val support=primitive(ocean,"ClampSupport",cylinder,gold,V3(),V3(1.0,1.0,1.0));models["support"]=support
         segment(support,RescueGeometry.targets.getValue("brace-point"),V3(.205,-.13,-.61),.011)
         models["float_bag"]=clone("float_bag",ocean)
-        models["console"]=clone("console",consoleRoot)
-        models["handle"]=clone("handle",consoleRoot).also{it.setName("input.handle");transform(it).setPosition(V3(0.0,.06,.018).sdk());hit(it,V3(.09,.11,.09),V3(0.0,.04,0.0))}
+        // Wider and a little deeper (2026-11-13 review: the back row hid behind the front one): room for the spread-out controls.
+        models["console"]=clone("console",consoleRoot).also{transform(it).setScaleVector(Vector3(1.55f,1f,1.15f))}
+        models["handle"]=clone("handle",consoleRoot).also{it.setName("input.handle");transform(it).setPosition(V3(0.0,.06,.018).sdk());hit(it,V3(.09,.11,.09),V3(0.0,.04,0.0));controlShapes["handle"]=V3(.09,.11,.09) to V3(0.0,.04,0.0);controlViews["handle"]=it}
+        consoleControls()
         for((id,p) in RescueGeometry.targets){
             // Collision lives on an unscaled parent. Scaling a tiny visual must never shrink the tap target.
             val e=group("input.$id");ocean.addChild(e);transform(e).setPosition(p.sdk())
@@ -174,6 +180,109 @@ class RescueScene {
         for((id,point) in MissionGeometry.targets){val e=group("input.$id");ocean.addChild(e);transform(e).setPosition(point.sdk());primitive(e,"Marker.$id",ball,cyan,V3(),V3(.025,.025,.025));nameTag(MissionGeometry.names[id]?:id).also{e.addChild(it);transform(it).setPosition(Vector3(0f,.05f,0f))};hit(e,V3(.11,.11,.11),V3());extraTargets[id]=e}
         ready=true;Log.i("DeepSeaRescue","ASSETS_READY models=${templates.size}; realNativeAppearance=unverified")
     }
+    /**
+     * The console's own controls beside the joystick (2026-11-10/12 reviews: after the joystick nearly
+     * everything was a panel button; use hand-worked controls on the console instead). Buttons are
+     * pressed; levers and knobs are pushed up or down (the steering lever left or right), one step per
+     * push. What each does follows the step (RescueViewModel.physical).
+     */
+    private fun consoleControls(){
+        fun mat(r:Float,g:Float,b:Float,e:Float)=keep(PhysicallyBasedMaterial.create()).apply{setBaseColor(Color4(r,g,b,1f));setRoughness(.35f);setMetallic(.3f);setEmissiveColor(Color4(r*e,g*e,b*e,1f))}
+        val orange=mat(1f,.55f,.12f,.35f);val red=mat(.9f,.12f,.1f,.35f);val blue=mat(.2f,.55f,.95f,.3f);val steel=mat(.7f,.72f,.75f,.05f);val green=mat(.3f,.8f,.45f,.3f)
+        fun control(name:String,label:String,at:V3,build:(Entity)->Unit){
+            val e=group("input.ctl.$name");consoleRoot.addChild(e);transform(e).setPosition(at.sdk());build(e)
+            nameTag(label).also{e.addChild(it);transform(it).setPosition(Vector3(0f,.075f,0f));transform(it).setScaleVector(Vector3(.75f))}
+            hit(e,V3(.075,.09,.075),V3(0.0,.03,0.0));controlShapes[name]=V3(.075,.09,.075) to V3(0.0,.03,0.0);controlViews[name]=e
+        }
+        fun button(m:Material)={e:Entity->primitive(e,"Base",cylinder,steel,V3(0.0,.006,0.0),V3(.032,.012,.032));primitive(e,"Cap",cylinder,m,V3(0.0,.02,0.0),V3(.026,.016,.026));Unit}
+        fun lever(m:Material)={e:Entity->primitive(e,"Slot",cylinder,steel,V3(0.0,.004,0.0),V3(.06,.008,.02));primitive(e,"Stick",cylinder,steel,V3(0.0,.03,0.0),V3(.006,.05,.006));primitive(e,"Knob",ball,m,V3(0.0,.058,0.0),V3(.026,.026,.026));Unit}
+        fun knob(m:Material)={e:Entity->primitive(e,"Dial",cylinder,m,V3(0.0,.012,0.0),V3(.03,.024,.03));primitive(e,"Pointer",cylinder,steel,V3(0.0,.026,.012),V3(.004,.004,.02));Unit}
+        // Two rows 14 cm apart (was 9), the back row a little higher, 13 cm between neighbours (2026-11-13 review).
+        control("go","执行",V3(-.16,.04,.05),button(orange))
+        control("stop","停",V3(-.16,.055,-.09),button(red))
+        control("dial","转轮",V3(-.29,.04,-.02),knob(green))
+        control("air","充气",V3(.16,.04,.05),knob(blue))
+        control("air2","右袋",V3(.29,.04,.05),knob(blue))
+        control("winch","收缆",V3(.16,.055,-.09),lever(orange))
+        control("steer","引导",V3(.29,.055,-.09),lever(blue))
+    }
+    private val controlViews=HashMap<String,Entity>()
+    /** Each control's pinch box: its size and centre, to make a new shape whenever it is switched back on. */
+    private val controlShapes=HashMap<String,Pair<V3,V3>>()
+    /** The control the finger is pinching right now, if any. */
+    @Volatile var held:String?=null
+    private var activeShown:Set<String>?=null
+
+    /**
+     * Only the controls that act at this step can be pointed at and pinched, and light up under the finger; the others
+     * are dimmed and let the finger pass (2026-11-13 review).
+     */
+    fun setActive(active:Set<String>){
+        if(active==activeShown)return
+        // A control still in the hand keeps its parts until it is let go: taking them off something being pinched can
+        // bring the app down (2026-11-13: crash pressing 「执行」 to hang the float bag, which turned it off at once).
+        val skipped=held!=null&&held in controlViews&&((held in active)!=(held in (activeShown?:emptySet())))
+        activeShown=if(skipped)null else active
+        for((name,e) in controlViews){
+            if(name==held)continue
+            val on=name in active
+            // A fresh shape each time: taking the collision off frees the shape it used, and setting a freed shape again
+            // brings the app down (emulator, 2026-11-13: the crash at hanging the float bag, 「执行」 off and on again).
+            if(on){val spec=controlShapes[name]?:continue;if(e.components[CollisionComponent::class.java]==null){val base=keep(ShapeResource.createBox(spec.first.sdk()));val shifted=base.offsetByTranslation(spec.second.sdk());if(shifted!==base)keep(shifted);e.components.set(CollisionComponent(collisionShape=listOf(shifted),physicsMaterial=physics))};e.components.set(InteractableComponent());e.components.set(HoverEffectComponent())}
+            else{e.components.remove(HoverEffectComponent::class.java);e.components.remove(InteractableComponent::class.java);e.components.remove(CollisionComponent::class.java)}
+            val o=e.components[com.pico.spatial.core.ecs.OpacityControllerComponent::class.java]
+            val a=if(on)1f else .32f
+            if(o==null)e.components.set(com.pico.spatial.core.ecs.OpacityControllerComponent(a))else o.opacity=a
+            if(!on&&tipFor==name)hideTip()
+        }
+    }
+
+    // ---- What a control is for, shown when the finger points at it, for a few seconds ----
+    private val tips=HashMap<String,Entity>()
+    private var tipFor:String?=null
+    private var tipUntil=0L
+
+    /** The finger points at control [name]: its card shows above it for [TIP_MS] ms. Pointing at it again restarts it. */
+    fun pointAt(name:String,title:String,body:String){
+        val e=controlViews[name]?:return
+        val key="$name|$title|$body"
+        if(tipFor!=null&&tipFor!=name)hideTip()
+        val card=tips.getOrPut(key){tipCard(title,body).also{consoleRoot.addChild(it)}}
+        tips.values.forEach{if(it!==card)it.enabled=false}
+        val at=transform(e).position
+        transform(card).setPosition(Vector3(at.x,at.y+(if(name=="handle").2f else .17f),at.z))
+        card.enabled=true
+        if(tipFor!=name||System.currentTimeMillis()>tipUntil)tipUntil=System.currentTimeMillis()+TIP_MS
+        tipFor=name
+    }
+
+    private fun hideTip(){tips.values.forEach{it.enabled=false};tipFor=null}
+
+    private fun tipTick(){if(tipFor!=null&&System.currentTimeMillis()>tipUntil)hideTip()}
+
+    /** A small card: a bold title, then what the control does and how, wrapped to the card's width. */
+    private fun tipCard(title:String,body:String):Entity {
+        val wPx=560;val pad=22f
+        val head=Paint().apply{isAntiAlias=true;color=0xFF0B3440.toInt();textSize=40f;typeface=Typeface.DEFAULT_BOLD}
+        val ink=Paint().apply{isAntiAlias=true;color=0xFF173C44.toInt();textSize=32f}
+        val lines=ArrayList<String>();var line=""
+        for(ch in body){val t=line+ch;if(ink.measureText(t)>wPx-2*pad){lines+=line;line=ch.toString()}else line=t};if(line.isNotEmpty())lines+=line
+        val hPx=(pad*2+48+lines.size*42).toInt()
+        val b=Bitmap.createBitmap(wPx,hPx,Bitmap.Config.ARGB_8888)
+        Canvas(b).apply{
+            drawRoundRect(0f,0f,wPx.toFloat(),hPx.toFloat(),26f,26f,Paint().apply{isAntiAlias=true;color=0xF2E8FAF5.toInt()})
+            drawRoundRect(3f,3f,wPx-3f,hPx-3f,24f,24f,Paint().apply{isAntiAlias=true;style=Paint.Style.STROKE;strokeWidth=5f;color=0xFF2C9C8C.toInt()})
+            drawText(title,pad,pad+38,head)
+            lines.forEachIndexed{i,l->drawText(l,pad,pad+48+38+i*42f,ink)}
+        }
+        val texture=keep(TextureResource.create(b));b.recycle()
+        val m=keep(UnlitMaterial.create(BlendingMode.MASKED)).apply{setBaseColorTexture(texture);setOpacityThreshold(.3f)}
+        val w=.2f;val h=w*hPx/wPx;val x=w/2;val y=h/2
+        // A texture made from a bitmap has its top row at v = 1.
+        val mesh=keep(MeshResource.createWithMeshModel(MeshModel(listOf(Vector3(-x,-y,0f),Vector3(x,-y,0f),Vector3(x,y,0f),Vector3(-x,y,0f)),listOf(0,1,2,0,2,3),List(4){Vector3(0f,0f,1f)},List(4){com.pico.spatial.core.math.Vector4(1f,0f,0f,1f)},listOf(com.pico.spatial.core.math.Vector2(0f,0f),com.pico.spatial.core.math.Vector2(1f,0f),com.pico.spatial.core.math.Vector2(1f,1f),com.pico.spatial.core.math.Vector2(0f,1f))),com.pico.spatial.core.ecs.BoundingBox(Vector3(-x,-y,-.001f),Vector3(x,y,.001f)),"tip${title.hashCode()}${body.hashCode()}"))
+        return group("tip$title").also{it.components.set(ModelComponent(mesh,m));it.enabled=false;transform(it).setEulerAngles(EulerAngles(-20f,0f,0f))}
+    }
+
     /** Steps and buttons call targets by these names, so the scene shows which dot is which. */
     private fun nameTag(text:String):Entity {
         val px=96
@@ -221,6 +330,7 @@ class RescueScene {
     }
     fun unplace(){fittedSceneRoot.enabled=false;consoleRoot.enabled=false;if(mount!=null){mount=null;panelPositioned=false;controls?.enabled=false}}
     fun render(s:RescueUiState){if(!ready)return;ensurePanel()
+        setActive(com.vrgames.deeprescue.domain.ConsoleGuide.active(s.progress));tipTick()
         val m=s.preview?:s.mount
         if(m==null){unplace();return}
         place(m,s.mount==null)
@@ -229,7 +339,8 @@ class RescueScene {
         if(visualTime<0||p.elapsed<visualTime)displayedAir=p.air.toDouble() else displayedAir+=(p.air-displayedAir)*(frameDt*5).coerceAtMost(1.0)
         val swim=if(p.phase in listOf(RescuePhase.FAREWELL,RescuePhase.RESULT))(p.farewell/7.5).coerceIn(0.0,1.0)else 0.0
         val turtlePosition=p.turtle+V3(swim*.14,sin(swim*PI)*.003,-swim*.20)
-        transform(turtle).setPosition(turtlePosition.sdk())
+        // Lifted so the hanging flippers clear the sea floor (2026-11-12 review: it sank into the tank's bottom).
+        transform(turtle).setPosition((turtlePosition+V3(0.0,TURTLE_LIFT,0.0)).sdk())
         transform(wrist).setPosition(p.tool.sdk())
         models.getValue("lamp").enabled=p.phase==RescuePhase.INSPECT
         models.getValue("cutter").enabled=p.phase==RescuePhase.CUT
@@ -324,10 +435,13 @@ class RescueScene {
     private fun orient(e:Entity,d:V3){val n=d.normalized();val yaw=atan2(-n.z,n.x)*180/PI;val z=-acos(n.y.coerceIn(-1.0,1.0))*180/PI;transform(e).setEulerAngles(EulerAngles(0f,yaw.toFloat(),z.toFloat()))}
     fun deltaFromRoot(d:V3):V3 {val a=fittedSceneRoot.convertPositionFrom(d.sdk(),root);val b=fittedSceneRoot.convertPositionFrom(Vector3.ZERO,root);return V3((a.x-b.x).toDouble(),(a.y-b.y).toDouble(),(a.z-b.z).toDouble())}
     fun target(entity:Entity?):String?{var e=entity;repeat(16){val a=e?:return null;val n=a.getName();if(n.startsWith("input."))return n.substringAfter("input.");e=a.getParent()};return null}
-    private fun hit(e:Entity,size:V3,center:V3){val base=keep(ShapeResource.createBox(size.sdk()));val shifted=base.offsetByTranslation(center.sdk());if(shifted!==base)keep(shifted);e.components.set(InteractableComponent());e.components.set(HoverEffectComponent());e.components.set(CollisionComponent(collisionShape=listOf(shifted),physicsMaterial=physics))}
+    private fun hit(e:Entity,size:V3,center:V3):ShapeResource{val base=keep(ShapeResource.createBox(size.sdk()));val shifted=base.offsetByTranslation(center.sdk());if(shifted!==base)keep(shifted);e.components.set(InteractableComponent());e.components.set(HoverEffectComponent());e.components.set(CollisionComponent(collisionShape=listOf(shifted),physicsMaterial=physics));return shifted}
     fun release(){if(disposed)return;disposed=true;ready=false;animation.forEach{runCatching{it.stop();it.close()}};animation.clear();controls?.let{if(it.getParent()==root)it.removeFromParent()};controls=null;root.destroy();templates.values.forEach{it.destroy()};templates.clear();resources.forEach{runCatching{it.close()}};resources.clear()}
     companion object {
         private fun group(name:String)=Entity().apply{setName(name);components.set(TransformComponent())}
+        const val TURTLE_LIFT=.07
+        /** How long a control's card stays up after the finger points at it. */
+        const val TIP_MS=4000L
         private fun transform(e:Entity)=e.components[TransformComponent::class.java]?:TransformComponent().also{e.components.set(it)}
         private fun Entity.at(v:V3)=apply{transform(this).setPosition(v.sdk())}
     }

@@ -36,6 +36,9 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     fun targetAllowed(id:String)=G.targetAllowed(progress.phase,id)||M.allowed(progress.phase,id)
     fun targetPosition(id:String)=if(id=="load-weight"&&!progress.work.heavyRight)M.targets[id]?.let{it.copy(x=-it.x)}else G.targets[id]?:M.targets[id]
     fun targetName(id:String)=G.names[id]?:M.names[id]?:id
+    /** The target of this step the tool is nearest, if within [r] metres. */
+    fun nearestAllowed(r:Double):String?=(G.targets.keys+M.targets.keys).filter{targetAllowed(it)&&(progress.phase!=P.INSPECT||it !in progress.inspected)}
+        .mapNotNull{id->targetPosition(id)?.let{id to (progress.tool-it).length()}}.filter{it.second<=r}.minByOrNull{it.second}?.first
     private fun contact(id:String):Boolean {val t=targetPosition(id)?:return false;return !moving&&pointer==null&&(progress.tool-t).length()<=.055}
     fun setActive(value:Boolean){active=value;if(!value)stop()}
     fun settings(music:Boolean,sfx:Boolean){progress=progress.copy(settings=progress.settings.copy(music=music,sfx=sfx))}
@@ -50,11 +53,14 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
         if(progress.phase==P.WINCH){reel(1);return}
         if(progress.phase==P.BALANCE_LIFT){liftCage(1);return}
         if(progress.phase==P.ESCORT_PLAN){escort();return}
-        val id=selected?:return hint("请先选择本步目标。")
+        // Nothing picked but the arm brought there with the joystick: work on the target it is at (2026-11-13 device test:
+        // the arm at the turtle's back, 「执行」 did nothing, because only a target picked first could be worked on).
+        val id=selected?:nearestAllowed(NEAR)?.also{n->selected=n;targetPosition(n)?.let{progress=progress.copy(tool=it)}}
+            ?:return hint("先用摇杆把机械臂移到要操作的目标旁边，或者点一下那个目标。")
         if(!targetAllowed(id)||moving||pointer!=null)return hint("请先停稳机械臂。")
-        if((progress.tool-requireNotNull(targetPosition(id))).length()>.055)return hint("工具还没有靠近目标，请先点“对准已选目标”。")
+        if((progress.tool-requireNotNull(targetPosition(id))).length()>.055)return hint("工具还没有靠近目标：先点一下那个目标，机械臂会自己过去。")
         if(progress.phase==P.CUT&&(!progress.braced||id!=listOf("front-rope","rear-rope").getOrNull(progress.cuts)))return mistake("顺序不对：先点「前鳍绳」，再点「尾部绳」。")
-        if(progress.phase==P.BAG&&progress.attached)return hint("浮袋已挂好，请加到两档浮力。")
+        if(progress.phase==P.BAG&&progress.attached)return hint("浮袋已挂好，把「充气」旋钮推到两档。")
         if(progress.phase==P.BEACON_ALIGN){testBeacon();return}
         if(progress.phase==P.INSPECT&&id in progress.inspected)return hint("这里已经照清，可以检查下一处。")
         actTime=0.0;acting=true;targetAtAction=id;message=if(progress.phase in listOf(P.INSPECT,P.BEACON_SURVEY,P.BALANCE_SURVEY))"探照灯正在照${targetName(id)}……"else"正在操作${targetName(id)}……"
@@ -62,7 +68,7 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     fun air(delta:Int){if(!active||progress.phase !in listOf(P.BAG,P.WINCH))return
         if(!progress.attached)return hint("先把浮袋挂在背带扣上。")
         progress=progress.copy(air=(progress.air+delta.coerceIn(-1,1)).coerceIn(0,3));sound("air")
-        if(progress.phase==P.BAG&&progress.air==2)change(P.WINCH,"浮袋已就位。向左绕开木梁，再一点点收缆。")
+        if(progress.phase==P.BAG&&progress.air==2)change(P.WINCH,"浮袋已就位。海龟得先从木梁左边绕过去，再一点点收缆：找找操纵台上管方向的拉杆和管缆绳的拉杆。")
         else if(progress.air==3)hint("浮力偏大，缆绳容易拉紧。可以少放一点气。")
     }
     fun steer(delta:Int){if(!active||progress.phase!=P.WINCH)return;steer=delta.coerceIn(-1,1)*.085;reel=0.0;message="正在平稳引导。"}
@@ -129,14 +135,14 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     /** Says what to press next, by the name on the button. */
     private fun arrived():String{val name=selected?.let{targetName(it)}?:return "机械臂已到位。先选一个目标。"
         return when(progress.phase){
-            P.INSPECT->"已对准$name。现在点面板下方的「照射已选目标」。"
-            P.BRACE->"已对准$name。现在点面板下方的「夹紧托座」。"
-            P.CUT->"已对准$name。现在点面板下方的「闭合剪钳」。"
-            P.BAG->"已对准$name。现在点面板下方的「挂好浮袋」。"
-            P.BEACON_SURVEY,P.BALANCE_SURVEY->"已对准$name。现在点面板下方的「照清此处」。"
-            P.BEACON_POWER->"已对准$name。现在点面板下方的「断电 / 更换电芯」。"
-            P.BEACON_ALIGN->"已对准$name。现在用面板上的刻度按钮转动它。"
-            P.BALANCE_ATTACH->"已对准$name。现在点面板下方的「挂好这侧浮袋」。"
+            P.INSPECT->"已对准$name。按操纵台上的橙色「执行」键照亮它。"
+            P.BRACE->"已对准$name。按橙色「执行」键夹紧托座。"
+            P.CUT->"已对准$name。按橙色「执行」键闭合剪钳。"
+            P.BAG->"已对准$name。按橙色「执行」键挂好浮袋。"
+            P.BEACON_SURVEY,P.BALANCE_SURVEY->"已对准$name。按橙色「执行」键照清此处。"
+            P.BEACON_POWER->"已对准$name。按橙色「执行」键断电、换电芯。"
+            P.BEACON_ALIGN->"已对准$name。把绿色「转轮」旋钮往上推或往下推，转动它。"
+            P.BALANCE_ATTACH->"已对准$name。按橙色「执行」键挂好这侧浮袋。"
             else->"已对准$name。"
         }
     }
@@ -144,7 +150,7 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
         P.INSPECT->{progress=progress.copy(inspected=progress.inspected+id);sound("inspect");if(progress.inspected.size==3)change(P.BRACE,"三处都已照清。点「黄色夹座」，把木梁夹稳。")else hint("${targetName(id)}已照清（${progress.inspected.size}/3）。还差："+listOf("front-rope","rear-rope","brace-point").filter{it !in progress.inspected}.joinToString("、"){targetName(it)}+"，点它们。")}
         P.BRACE->{progress=progress.copy(braced=true);sound("clamp");change(P.CUT,"木梁已经固定。先点「前鳍绳」，再点「尾部绳」。")}
         P.CUT->{progress=progress.copy(cuts=progress.cuts+1);sound("cut");if(progress.cuts==2)change(P.BAG,"绳子都松开了。点「龟背上的背带扣」，挂上浮袋。")else hint("前鳍绳已剪开。现在点「尾部绳」。")}
-        P.BAG->{progress=progress.copy(attached=true);sound("clamp");hint("浮袋已挂好，点两次“多一点气”。")}
+        P.BAG->{progress=progress.copy(attached=true);sound("clamp");hint("浮袋已挂好。把蓝色「充气」旋钮往上推两下。")}
         else->completeMissionAction(id)
     }}
 
@@ -155,7 +161,7 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
         else->Unit
     }}
     fun dial(delta:Int){if(!active||progress.phase!=P.BEACON_ALIGN)return
-        val id=selected?:return hint("先选一只导光轮，对准后再转动。")
+        val id=selected?:return hint("先点一只导光轮，机械臂到位后再转「转轮」旋钮。")
         val i=listOf("lens-left","lens-mid","lens-right").indexOf(id)
         if(i<0||!contact(id)||acting)return hint("机械臂需要先对准并停稳。")
         val values=progress.work.dials.toMutableList();for(j in listOf(i,(i+1)%3))values[j]=(values[j]+delta.coerceIn(-1,1)+4)%4
@@ -174,7 +180,7 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
         cageLift=direction.coerceIn(-1,1)*.07;cagePark=0.0;hint("网笼正在小段升降，可以随时停止。")}
     fun parkCage(direction:Int){if(!active||progress.phase!=P.BALANCE_LIFT)return
         if(progress.work.cageHeight<.23||!M.balanced(progress.work))return mistake("还没有离开卡住的底座。先调平并提升到 23 厘米以上。")
-        cagePark=direction.coerceIn(-1,1)*.08;cageLift=0.0;hint("正在向停放架平移；到位后点“锁住停放架”。")}
+        cagePark=direction.coerceIn(-1,1)*.08;cageLift=0.0;hint("正在向停放架平移；到位后按橙色「执行」键锁住。")}
     fun lockCage(){if(!active||progress.phase!=P.BALANCE_LIFT)return
         val w=progress.work;if(w.cageHeight<.23||w.cageOffset<.32||!M.balanced(w)||abs(cagePark)>.00001)return hint("网笼需平稳停在右侧架上：抬高 23 厘米、平移 32 厘米，等它停稳。")
         progress=progress.copy(work=w.copy(locked=true));change(P.RESULT,"网笼已锁定在停放架，航道真正打开了。")}
@@ -209,5 +215,9 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     private fun hint(m:String){message=m}
     private fun mistake(m:String){progress=progress.copy(errors=progress.errors+1);message=m;sound("warning")}
     private fun sound(s:String){effect=s;effectId++}
-    private companion object { val ONE_PRESS=setOf(P.INSPECT,P.BRACE,P.CUT,P.BAG,P.BEACON_SURVEY,P.BEACON_POWER,P.BALANCE_SURVEY,P.BALANCE_ATTACH) }
+    companion object {
+        /** 「执行」 with nothing picked works on a target of this step at most this far from the tool. */
+        const val NEAR=.10
+        private val ONE_PRESS=setOf(P.INSPECT,P.BRACE,P.CUT,P.BAG,P.BEACON_SURVEY,P.BEACON_POWER,P.BALANCE_SURVEY,P.BALANCE_ATTACH)
+    }
 }

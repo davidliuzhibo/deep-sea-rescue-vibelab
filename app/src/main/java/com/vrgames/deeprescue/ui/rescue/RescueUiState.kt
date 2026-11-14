@@ -12,6 +12,8 @@ sealed interface RescueEvent {
     data class DragMove(val pointer:Long,val total:V3):RescueEvent
     data class DragEnd(val pointer:Long,val cancelled:Boolean):RescueEvent
     data object CancelInput:RescueEvent
+    /** A console control: a button pressed ([delta] 1), or a lever or knob pushed one step up (1) or down (-1). */
+    data class Physical(val name:String,val delta:Int):RescueEvent
 }
 
 data class RescueUiState(
