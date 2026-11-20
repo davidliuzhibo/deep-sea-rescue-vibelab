@@ -15,7 +15,47 @@ import java.io.File
 class FullCampaignTest {
     @get:Rule val folder=TemporaryFolder()
     private fun time(e:RescueEngine,t:Double){repeat((t*120).toInt()){e.tick(1.0/120)}}
-    private fun operate(e:RescueEngine,id:String){e.select(id);e.approach();time(e,6.0);assertFalse("tool failed to reach $id: ${e.message}",e.moving);e.execute();time(e,1.2)}
+    private fun operate(e:RescueEngine,id:String){
+        focusIsOpen(e)
+        // v1.2.1: the rope step rings 前鳍绳 until it is cut, whatever is picked or near.
+        if(e.progress.phase==RescuePhase.CUT&&e.progress.cuts==0)assertEquals("front-rope",StepFocus.focus(e.progress,e.selected))
+        e.select(id);e.approach();time(e,6.0);assertFalse("tool failed to reach $id: ${e.message}",e.moving);e.execute();time(e,1.2)
+        // Done targets are let go of: the ring moves on and the panel names what is next.
+        assertNull("still picked after $id",e.selected);focusIsOpen(e)
+    }
+    /** Every step: the ring is on a target not done yet (or on none, where the next move is on the console or a puzzle). */
+    private fun focusIsOpen(e:RescueEngine){val p=e.progress;val f=StepFocus.focus(p,e.selected)
+        if(f!=null)assertFalse("focus on done $f in ${p.phase}",StepFocus.done(p,f))
+        else assertTrue("no focus in ${p.phase} with ${StepFocus.remaining(p)} left",StepFocus.remaining(p).isEmpty()||StepFocus.puzzle(p))}
+    /** Drags the arm with the joystick until the tool is [gap] metres from [target], then lets go (as LooserArmTest). */
+    private fun dragTo(e:RescueEngine,target:V3,gap:Double){assertTrue(e.dragBegin(7));var total=V3();var guard=0
+        while((e.progress.tool-target).length()>gap&&guard++<400){val left=target-e.progress.tool;total=total+left*(.015/maxOf(left.length(),1e-9));e.dragMove(7,total);time(e,.15)}
+        e.dragEnd(7,false)}
+    private fun toCut():RescueEngine{val e=RescueEngine();e.setActive(true)
+        for(id in listOf("front-rope","rear-rope","brace-point"))operate(e,id);operate(e,"brace-point")
+        assertEquals(RescuePhase.CUT,e.progress.phase);return e}
+    @Test fun lettingGoNearTheWrongRopeOnlyHints(){val e=toCut()
+        // The arm is parked at the beam clamp (nearer 尾部绳 than 前鳍绳).
+        assertTrue((e.progress.tool-e.targetPosition("brace-point")!!).length()<.01)
+        assertEquals("front-rope",StepFocus.focus(e.progress,e.selected))
+        val errors=e.progress.errors
+        dragTo(e,e.targetPosition("rear-rope")!!,.10);time(e,2.0)
+        assertTrue((e.progress.tool-e.targetPosition("rear-rope")!!).length() in .08..10.0)
+        assertEquals("no execution",0,e.progress.cuts);assertFalse(e.acting);assertEquals("no mistake",errors,e.progress.errors)
+        assertTrue(e.message,e.message.contains("前鳍绳"));assertEquals("front-rope",StepFocus.focus(e.progress,e.selected))
+        // 「执行」 there with nothing picked does not cut it either.
+        e.execute();time(e,2.0);assertEquals(0,e.progress.cuts);assertEquals(errors,e.progress.errors)
+        // Near the right one it cuts, lets go of it, and the ring moves to 尾部绳.
+        dragTo(e,e.targetPosition("front-rope")!!,.10);time(e,1.5)
+        assertEquals(e.message,1,e.progress.cuts);assertEquals(errors,e.progress.errors);assertNull(e.selected)
+        assertEquals("rear-rope",StepFocus.focus(e.progress,e.selected))
+        // The cut rope cannot be picked again.
+        e.select("front-rope");assertNull(e.selected);assertEquals(errors,e.progress.errors)}
+    @Test fun pickingTheWrongRopeStillSaysOrder(){val e=toCut();val errors=e.progress.errors
+        e.go("rear-rope");time(e,6.0);assertEquals(0,e.progress.cuts);assertEquals(errors+1,e.progress.errors);assertTrue(e.message,e.message.contains("顺序不对"))
+        assertEquals("front-rope",StepFocus.focus(e.progress,e.selected))}
+    @Test fun hookedBagRingsNothingAndCannotBePickedAgain(){val e=toCut();operate(e,"front-rope");operate(e,"rear-rope");operate(e,"float-hook")
+        assertTrue(e.progress.attached);assertNull(StepFocus.focus(e.progress,e.selected));e.select("float-hook");assertNull(e.selected)}
     private fun first():RescueEngine {
         val e=RescueEngine();e.setActive(true)
         for(id in listOf("front-rope","rear-rope","brace-point"))operate(e,id)
@@ -27,7 +67,9 @@ class FullCampaignTest {
     private fun beacon(e:RescueEngine){assertTrue(e.startMission(1));e.setActive(true)
         for(t in listOf("power-port","lens-left","lens-mid"))operate(e,t)
         operate(e,"power-port");assertTrue(e.progress.work.isolated);assertFalse(e.progress.work.cell);operate(e,"power-port")
-        e.select("lens-left");e.approach();time(e,6.0);e.dial(1)
+        // The wheel puzzle: nothing is ringed until the player picks a wheel.
+        assertEquals(RescuePhase.BEACON_ALIGN,e.progress.phase);assertNull(StepFocus.focus(e.progress,e.selected))
+        e.select("lens-left");assertEquals("lens-left",StepFocus.focus(e.progress,e.selected));e.approach();time(e,6.0);e.dial(1)
         e.select("lens-mid");e.approach();time(e,6.0);e.dial(1);e.dial(1)
         assertEquals(listOf(1,3,2),e.progress.work.dials);e.execute();time(e,3.1)
         assertEquals(RescuePhase.RESULT,e.progress.phase);assertTrue(RescueRepository.valid(e.progress))

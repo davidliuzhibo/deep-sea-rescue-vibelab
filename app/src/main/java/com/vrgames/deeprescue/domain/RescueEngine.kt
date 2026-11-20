@@ -36,13 +36,29 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     fun targetAllowed(id:String)=G.targetAllowed(progress.phase,id)||M.allowed(progress.phase,id)
     fun targetPosition(id:String)=if(id=="load-weight"&&!progress.work.heavyRight)M.targets[id]?.let{it.copy(x=-it.x)}else G.targets[id]?:M.targets[id]
     fun targetName(id:String)=G.names[id]?:M.names[id]?:id
-    /** The target of this step the tool is nearest, if within [r] metres. */
-    fun nearestAllowed(r:Double):String?=(G.targets.keys+M.targets.keys).filter{targetAllowed(it)&&(progress.phase!=P.INSPECT||it !in progress.inspected)}
-        .mapNotNull{id->targetPosition(id)?.let{id to (progress.tool-it).length()}}.filter{it.second<=r}.minByOrNull{it.second}?.first
-    private fun contact(id:String):Boolean {val t=targetPosition(id)?:return false;return !moving&&pointer==null&&(progress.tool-t).length()<=.055}
+    /**
+     * The target of this step the tool is nearest, if within [r] metres — among those still to do, and in an ordered step
+     * only the next one (v1.2.1: letting go near 「尾部绳」 before 「前鳍绳」 cut it and counted a mistake).
+     */
+    fun nearestAllowed(r:Double):String?=nearestOf(StepFocus.reachable(progress),r)
+    /** An allowed target near the tool that may not be worked now (cut out of order, or already done), if any. */
+    private fun nearestOutOfTurn(r:Double):String?=nearestOf(StepFocus.order(progress).filter{it !in StepFocus.reachable(progress)},r)
+    private fun nearestOf(ids:List<String>,r:Double)=ids.mapNotNull{id->targetPosition(id)?.let{id to (progress.tool-it).length()}}.filter{it.second<=r}.minByOrNull{it.second}?.first
+    /** Says why the arm let go next to [id] does nothing, and what is next. Never counts as a mistake. */
+    private fun outOfTurn(id:String){val next=StepFocus.reachable(progress).firstOrNull()?.let{targetName(it)}
+        val name=targetName(id)
+        hint(when{
+            progress.phase==P.BAG&&progress.attached->"浮袋已挂好。把蓝色「充气」旋钮往上推两下。"
+            StepFocus.done(progress,id)->when(progress.phase){P.CUT->"${name}已经剪开了。";P.BALANCE_ATTACH->"这侧浮袋已经挂好了。";else->"${name}已经照清了。"}+(next?.let{"下一处：$it。"}?:"")
+            next!=null->"这里是${name}，现在还不能动它：先剪「$next」。把机械臂移到${next}旁边再松手。"
+            else->"这里不用再操作。"})}
+    private fun contact(id:String):Boolean {val t=targetPosition(id)?:return false;return !moving&&pointer==null&&(progress.tool-t).length()<=CONTACT}
     fun setActive(value:Boolean){active=value;if(!value)stop()}
     fun settings(music:Boolean,sfx:Boolean){progress=progress.copy(settings=progress.settings.copy(music=music,sfx=sfx))}
-    fun select(id:String){if(!active||!targetAllowed(id))return;cancelAction();goal=null;moving=false;selected=id;message="机械臂正在去${targetName(id)}……";sound("select")}
+    fun select(id:String){if(!active||!targetAllowed(id))return
+        // v1.2.1: a target already done (a cut rope, the hooked buckle, a spot lit) is not picked again.
+        if(StepFocus.done(progress,id)){outOfTurn(id);return}
+        cancelAction();goal=null;moving=false;selected=id;message="机械臂正在去${targetName(id)}……";sound("select")}
     /** The whole step from one press: the arm goes to the target and does what this step does there. */
     fun go(id:String){select(id);if(selected!=id)return;approach();doOnArrival=moving&&progress.phase in ONE_PRESS}
     fun approach(){if(!active)return;val id=selected?:return hint("请先选择本步目标。")
@@ -56,9 +72,14 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
         // Nothing picked but the arm brought there with the joystick: work on the target it is at (2026-11-13 device test:
         // the arm at the turtle's back, 「执行」 did nothing, because only a target picked first could be worked on).
         val id=selected?:nearestAllowed(NEAR)?.also{n->selected=n;targetPosition(n)?.let{progress=progress.copy(tool=it)}}
-            ?:return hint("先用摇杆把机械臂移到要操作的目标旁边，或者点一下那个目标。")
-        if(!targetAllowed(id)||moving||pointer!=null)return hint("请先停稳机械臂。")
-        if((progress.tool-requireNotNull(targetPosition(id))).length()>.055)return hint("工具还没有靠近目标：先点一下那个目标，机械臂会自己过去。")
+            ?:return nearestOutOfTurn(NEAR)?.let{outOfTurn(it)}?:hint("先用摇杆把机械臂移到要操作的目标旁边，或者点一下那个目标。")
+        if(!targetAllowed(id))return
+        // v1.2 (PICO 1118: 「机械臂触发执行的判定比较严格」): still moving, it stops here and works; near enough, it is drawn
+        // onto the target (within [NEAR]); only farther off is it told to come closer.
+        if(moving||pointer!=null){goal=null;moving=false;pointer=null}
+        val gap=(progress.tool-requireNotNull(targetPosition(id))).length()
+        if(gap>NEAR)return hint("工具离目标还有 ${(gap*100).toInt()} 厘米：用摇杆再靠近一点（16 厘米内会自动吸过去），或者点一下那个目标。")
+        if(gap>CONTACT)progress=progress.copy(tool=requireNotNull(targetPosition(id)))
         if(progress.phase==P.CUT&&(!progress.braced||id!=listOf("front-rope","rear-rope").getOrNull(progress.cuts)))return mistake("顺序不对：先点「前鳍绳」，再点「尾部绳」。")
         if(progress.phase==P.BAG&&progress.attached)return hint("浮袋已挂好，把「充气」旋钮推到两档。")
         if(progress.phase==P.BEACON_ALIGN){testBeacon();return}
@@ -83,7 +104,13 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     fun dragMove(id:Long,total:V3){if(!active||pointer!=id||!total.finite())return
         val delta=(total-rawLast).capped(.06)*.55;rawLast=total
         goal=(goal?:progress.tool)+delta;moving=true}
-    fun dragEnd(id:Long,cancelled:Boolean){if(pointer!=id)return;pointer=null;goal=null;moving=false;cancelAction();if(cancelled)hint("操作已取消，机械臂停住。")else hint("位置已保留，可以执行本步操作。")}
+    fun dragEnd(id:Long,cancelled:Boolean){if(pointer!=id)return;pointer=null;goal=null;moving=false;cancelAction();if(cancelled){hint("操作已取消，机械臂停住。");return}
+        // v1.2: let go near the step's target: the arm takes hold of it and works at once (no 「执行」 to find).
+        // v1.2.1: only a target still to do (in an ordered step only the next one); near any other it only says why not.
+        val near=nearestAllowed(NEAR)
+        if(near!=null&&StepFocus.puzzle(progress)){selected=near;targetPosition(near)?.let{progress=progress.copy(tool=it)};hint(arrived())}
+        else if(near!=null){selected=near;targetPosition(near)?.let{progress=progress.copy(tool=it)};message="已靠近${targetName(near)}，自动执行。";execute()}
+        else nearestOutOfTurn(NEAR)?.let{outOfTurn(it)}?:hint("位置已保留。移到目标 16 厘米内松手，就会自动执行。")}
     fun stop(){doOnArrival=false;cageLift=0.0;cagePark=0.0;escorting=false;pointer=null;goal=null;moving=false;cancelAction();reel=0.0;steer=0.0;accumulator=0.0}
     private fun cancelAction(){acting=false;actTime=0.0;targetAtAction=null}
     fun restart(){stop();progress=CampaignUseCase.fresh(progress);selected=null;tension=0.0;currentStrong=false;message="本次任务已重开；其他任务记录保留。"}
@@ -101,7 +128,7 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
             else if(progress.campaign.mission==0&&G.bodyContact(next,progress.turtle)){doOnArrival=false;goal=null;moving=false;mistake("保护海龟：工具已停住。请从外侧接近，或重新对准目标。")}
             else {progress=progress.copy(tool=next);if((next-destination).length()<.0001){goal=null;moving=false;if(doOnArrival){doOnArrival=false;execute()}else hint(arrived())}}}
         if(acting){val id=targetAtAction
-            if(id==null||selected!=id||moving||(progress.tool-requireNotNull(targetPosition(id))).length()>.055){cancelAction();return}
+            if(id==null||selected!=id||moving||(progress.tool-requireNotNull(targetPosition(id))).length()>CONTACT){cancelAction();return}
             actTime+=dt
             if(actTime>=if(progress.phase in listOf(P.INSPECT,P.BEACON_SURVEY,P.BALANCE_SURVEY)).9 else 1.1){cancelAction();completeAction(id)}}
         if(progress.campaign.mission>0){stepMission(dt);return}
@@ -146,7 +173,10 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
             else->"已对准$name。"
         }
     }
-    private fun completeAction(id:String){when(progress.phase){
+    private fun completeAction(id:String){
+        // v1.2.1: a finished target is let go of, so the ring and the panel move on (it stayed on the cut rope).
+        if(selected==id)selected=null
+        when(progress.phase){
         P.INSPECT->{progress=progress.copy(inspected=progress.inspected+id);sound("inspect");if(progress.inspected.size==3)change(P.BRACE,"三处都已照清。点「黄色夹座」，把木梁夹稳。")else hint("${targetName(id)}已照清（${progress.inspected.size}/3）。还差："+listOf("front-rope","rear-rope","brace-point").filter{it !in progress.inspected}.joinToString("、"){targetName(it)}+"，点它们。")}
         P.BRACE->{progress=progress.copy(braced=true);sound("clamp");change(P.CUT,"木梁已经固定。先点「前鳍绳」，再点「尾部绳」。")}
         P.CUT->{progress=progress.copy(cuts=progress.cuts+1);sound("cut");if(progress.cuts==2)change(P.BAG,"绳子都松开了。点「龟背上的背带扣」，挂上浮袋。")else hint("前鳍绳已剪开。现在点「尾部绳」。")}
@@ -217,7 +247,10 @@ class RescueEngine(initial:RescueProgress=RescueProgress()) {
     private fun sound(s:String){effect=s;effectId++}
     companion object {
         /** 「执行」 with nothing picked works on a target of this step at most this far from the tool. */
-        const val NEAR=.10
+        /** v1.2: within this of a target the arm is drawn onto it and works (was 10 cm). */
+        const val NEAR=.16
+        /** At the target: the tool within this (was 5.5 cm). */
+        const val CONTACT=.085
         private val ONE_PRESS=setOf(P.INSPECT,P.BRACE,P.CUT,P.BAG,P.BEACON_SURVEY,P.BEACON_POWER,P.BALANCE_SURVEY,P.BALANCE_ATTACH)
     }
 }

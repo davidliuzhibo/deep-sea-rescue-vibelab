@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.util.Log
 import com.pico.spatial.core.ecs.resource.BlendingMode
 import com.pico.spatial.core.ecs.resource.MeshModel
+import com.vrgames.deeprescue.domain.StepFocus
 import com.vrgames.deeprescue.domain.model.MissionGeometry
 import com.vrgames.deeprescue.domain.model.Mount
 import com.vrgames.deeprescue.domain.model.RescueGeometry
@@ -93,6 +94,15 @@ class RescueScene {
     private lateinit var complete:UnlitMaterial
     private lateinit var physics:PhysicsMaterialResource
     private lateinit var selection:Entity
+    /** v1.2 (PICO 1118: 「没有明确的引导」): the way from the tool to this step's target, and a ring round it. */
+    private var guideDots:List<Entity> = emptyList()
+    private var guideRing:Entity?=null
+    private var guideMat:UnlitMaterial?=null
+    /** The last focus line written to the log (one line each time it changes). */
+    private var focusLogged:String?=null
+    /** Green dots left where a level 2/3 target is done (lit, or its float bag hooked). */
+    private val extraDone=linkedMapOf<String,Entity>()
+    private var dressing:OceanDressing?=null
     private lateinit var workGlow:Entity
     private lateinit var wrist:Entity
     private lateinit var turtle:Entity
@@ -156,7 +166,8 @@ class RescueScene {
             val e=group("input.$id");ocean.addChild(e);transform(e).setPosition(p.sdk())
             targetVisuals[id]=primitive(e,"TargetMarker.$id",ball,cyan,V3(),V3(.022,.022,.022))
             // Replacing a model's material closes the old one in this SDK, and it cannot be set again: a twin instead.
-            doneVisuals[id]=primitive(e,"TargetDone.$id",ball,complete,V3(),V3(.022,.022,.022)).also{it.enabled=false}
+            // v1.2.1: outside the pinch entity, which is switched off once its target is done; the green dot stays as a trace.
+            doneVisuals[id]=primitive(ocean,"TargetDone.$id",ball,complete,p,V3(.022,.022,.022)).also{it.enabled=false}
             nameTag(RescueGeometry.names[id]?:id).also{e.addChild(it);transform(it).setPosition(Vector3(0f,.05f,0f))}
             hit(e,V3(.11,.11,.11),V3());targets[id]=e
         }
@@ -177,7 +188,12 @@ class RescueScene {
         // Obstacles use the same conservative box extents as the production route checks.
         MissionGeometry.blocks.forEachIndexed{i,b->extras["block$i"]=if(i<2)clone("route_rock",ocean).at(b.center).also{transform(it).setScaleVector(Vector3(1f,((b.center.y+.40)/.42).toFloat(),1f))}else group("ExitCrossCurrent").also{e->ocean.addChild(e);transform(e).setPosition(b.center.sdk());for(j in 0..4)primitive(e,"VisibleCurrentStripe.$j",cylinder,cyan,V3(0.0,-.055+j*.027,0.0),V3(.002,.32,.002)).also{transform(it).setEulerAngles(EulerAngles(0f,0f,90f))}}}
         for(i in 0..2)extras["beam$i"]=primitive(ocean,"BeaconLightTravel.$i",cylinder,cyan,V3(),V3(.004,.1,.004))
-        for((id,point) in MissionGeometry.targets){val e=group("input.$id");ocean.addChild(e);transform(e).setPosition(point.sdk());primitive(e,"Marker.$id",ball,cyan,V3(),V3(.025,.025,.025));nameTag(MissionGeometry.names[id]?:id).also{e.addChild(it);transform(it).setPosition(Vector3(0f,.05f,0f))};hit(e,V3(.11,.11,.11),V3());extraTargets[id]=e}
+        for((id,point) in MissionGeometry.targets){val e=group("input.$id");ocean.addChild(e);transform(e).setPosition(point.sdk());primitive(e,"Marker.$id",ball,cyan,V3(),V3(.025,.025,.025));nameTag(MissionGeometry.names[id]?:id).also{e.addChild(it);transform(it).setPosition(Vector3(0f,.05f,0f))};hit(e,V3(.11,.11,.11),V3());extraTargets[id]=e
+            extraDone[id]=primitive(ocean,"MarkerDone.$id",ball,complete,point,V3(.025,.025,.025)).also{it.enabled=false}}
+        guideMat=keep(UnlitMaterial.create(BlendingMode.TRANSPARENT)).apply{setBaseColor(Color4(1f,.85f,.35f,.85f))}
+        guideDots=(0 until 12).map{primitive(ocean,"GuideDot.$it",ball,guideMat!!,V3(),V3(.008,.008,.008)).also{d->d.enabled=false}}
+        guideRing=primitive(ocean,"GuideRing",keep(MeshResource.createTorus(1f,.9f)),keep(UnlitMaterial.create(BlendingMode.TRANSPARENT)).apply{setBaseColor(Color4(1f,.85f,.35f,.9f));setCullingMode(com.pico.spatial.core.ecs.resource.MaterialCullingMode.NONE)},V3(),V3(.05,.05,.05)).also{r->transform(r).setEulerAngles(EulerAngles(90f,0f,0f));r.enabled=false}
+        dressing=OceanDressing(ocean,::keep)
         ready=true;Log.i("DeepSeaRescue","ASSETS_READY models=${templates.size}; realNativeAppearance=unverified")
     }
     /**
@@ -353,11 +369,12 @@ class RescueScene {
         transform(models.getValue("jaw0")).setEulerAngles(EulerAngles(0f,jaw,0f));transform(models.getValue("jaw1")).setEulerAngles(EulerAngles(0f,180f-jaw,0f))
         val shoulder=RescueGeometry.armBase;val delta=p.tool-shoulder;val d=delta.length().coerceIn(.001,.758);val dir=delta.normalized();val up=(V3(0.0,1.0,0.0)-dir*dir.y).normalized();val elbow=shoulder+dir*(d/2)+up*sqrt((.38*.38-d*d/4).coerceAtLeast(0.0))
         link(models.getValue("link0"),shoulder,elbow);link(models.getValue("link1"),elbow,p.tool)
-        for((id,e) in targets){e.enabled=RescueGeometry.targetAllowed(p.phase,id)
+        // v1.2.1: a target that is done (lit, cut, hooked) can no longer be pointed at; only the green dot of a lit spot stays.
+        for((id,e) in targets){e.enabled=RescueGeometry.targetAllowed(p.phase,id)&&!StepFocus.done(p,id)
             val v=targetVisuals.getValue(id);val scale=if(id==s.selected).030f else .022f
             transform(v).setScaleVector(Vector3(scale))
             val done=p.phase==RescuePhase.INSPECT&&id in p.inspected
-            if(done!=(id in completedMarkers)){v.enabled=!done;doneVisuals.getValue(id).enabled=done;if(done)completedMarkers+=id else completedMarkers-=id}
+            if(done!=(id in completedMarkers)){doneVisuals.getValue(id).enabled=done;if(done)completedMarkers+=id else completedMarkers-=id}
         }
         selection.enabled=s.selected!=null&&p.phase in listOf(RescuePhase.INSPECT,RescuePhase.BRACE,RescuePhase.CUT,RescuePhase.BAG)
         s.selected?.let{RescueGeometry.targets[it]?.let{point->transform(selection).setPosition((point+V3(0.0,.045,0.0)).sdk())}}
@@ -374,11 +391,40 @@ class RescueScene {
             }
         }
         renderMissions(s,frameDt)
+        guide(s)
+        dressing?.frame(p.elapsed)
         if(p.elapsed!=visualTime){visualTime=p.elapsed
             animation.forEach{if(it.valid)it.setTime(((p.elapsed*.7)%4.5).toFloat())}
             particles.forEachIndexed{i,e->transform(e).setPosition(V3(-.66+((i*37%130)/100.0+p.elapsed*.002)%1.30,-.37+((p.elapsed*.014+i*.041)%.75),-.20-(i*13%90)/100.0).sdk())}
         }
     }
+    /**
+     * v1.2: the step's target (the one picked, else the nearest allowed one) with a breathing ring, and dots from the tool
+     * to it — gold while far, green once within reach of the arm's pull (16 cm). Hidden where no target is to be reached.
+     */
+    private fun guide(s:RescueUiState){
+        val p=s.progress
+        val ring=guideRing?:return
+        // v1.2.1: StepFocus picks it — in order for the ropes, never a done one, none in the wheel puzzle unless picked.
+        val id=StepFocus.focus(p,s.selected)
+        val line=StepFocus.describe(p,s.selected)
+        if(line!=focusLogged){focusLogged=line;Log.i("DeepSeaRescue",line)}
+        val target=id?.let{StepFocus.position(p,it)}
+        if(target==null||s.acting){ring.enabled=false;guideDots.forEach{it.enabled=false};return}
+        val gap=(p.tool-target).length()
+        val near=gap<=com.vrgames.deeprescue.domain.RescueEngine.NEAR
+        ring.enabled=true
+        val pulse=1.0+.18*sin(p.elapsed*(if(near)9.0 else 4.0))
+        transform(ring).setPosition(target.sdk());transform(ring).setScaleVector(Vector3((.05*pulse).toFloat()))
+        val n=guideDots.size
+        for((i,d) in guideDots.withIndex()){
+            val t=(i+1.0)/(n+1)
+            d.enabled=gap>.03
+            transform(d).setPosition((p.tool*(1-t)+target*t).sdk())
+        }
+        guideMat?.setBaseColor(if(near)Color4(.45f,1f,.55f,.9f)else Color4(1f,.85f,.35f,.85f))
+    }
+
     private fun renderMissions(s:RescueUiState,dt:Double){
         val p=s.progress;val w=p.work;val mission=p.campaign.mission;val first=mission==0
         for(k in listOf("beam","brace","support","harness"))models.getValue(k).enabled=first
@@ -422,7 +468,8 @@ class RescueScene {
             val path=MissionGeometry.path(w.copy(segment=i,checkpoint=from))
             for(j in 0..2){extras.getValue("guide$i-$j").apply{enabled=mission==3;segment(this,from,path[j],.0015)};from=path[j]}
         }
-        for((id,e) in extraTargets){e.enabled=MissionGeometry.allowed(p.phase,id);val point=MissionGeometry.targets.getValue(id).let{if(id=="load-weight"&&!w.heavyRight)it.copy(x=-it.x)else it};transform(e).setPosition(point.sdk())
+        for((id,e) in extraTargets){val doneHere=MissionGeometry.allowed(p.phase,id)&&StepFocus.done(p,id);e.enabled=MissionGeometry.allowed(p.phase,id)&&!doneHere;val point=MissionGeometry.targets.getValue(id).let{if(id=="load-weight"&&!w.heavyRight)it.copy(x=-it.x)else it};transform(e).setPosition(point.sdk())
+            extraDone[id]?.let{d->d.enabled=doneHere;if(doneHere)transform(d).setPosition(point.sdk())}
             if(id==s.selected){selection.enabled=e.enabled;transform(selection).setPosition((point+V3(0.0,.045,0.0)).sdk())}}
         // The moment a step is done has to show: the lamp is on all the time, so this is what the player sees change.
         val working=s.selected?.takeIf{s.acting}?.let{id->RescueGeometry.targets[id]?:MissionGeometry.targets[id]?.let{t->if(id=="load-weight"&&!w.heavyRight)t.copy(x=-t.x)else t}}

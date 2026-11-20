@@ -7,6 +7,8 @@ import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.vrgames.deeprescue.domain.StepFocus
+import com.vrgames.deeprescue.domain.model.V3
 import com.vrgames.deeprescue.ui.rescue.RescueEvent
 import com.vrgames.deeprescue.ui.rescue.RescueViewModel
 import com.vrgames.deeprescue.ui.rescue.components.PanelContract
@@ -25,6 +27,7 @@ import kotlinx.coroutines.launch
 object AutoPilot {
     const val ACTION = "com.vrgames.deeprescue.TEST"
     const val TAG = "RescueTest"
+    private const val DRAG = 77L
     var debug = false; private set
     var timeScale = 1.0
     var view: String? = null
@@ -56,7 +59,56 @@ object AutoPilot {
             "view" -> view = id?.takeIf { it != "reset" }
             "tap" -> id?.let { tap(v, it) }
             "state" -> v.state.value.let { Log.i(TAG, "state page=${it.page} phase=${v.engine.progress.phase} message=${it.message}") }
+            // v1.2.1 checks (no hands needed): what the ring is on, letting the stick go near a target, the whole rope check.
+            "focus" -> logFocus(v, "now")
+            "dragnear" -> { job?.cancel(); job = scope.launch { dragNear(v, id ?: "rear-rope", .10) } }
+            "ropecheck" -> { job?.cancel(); job = scope.launch { ropeCheck(v) } }
         }
+    }
+
+    private fun logFocus(v: RescueViewModel, at: String) =
+        Log.i(TAG, "focus $at ${StepFocus.describe(v.engine.progress, v.engine.selected)} label=${StepFocus.nextLabel(v.engine.progress, v.engine.selected)}")
+
+    /**
+     * Drags the arm with the joystick (the same drag events the hand sends) until the tool is [gap] metres from target
+     * [id], then lets go. Logs whether anything was worked and whether a mistake was counted.
+     */
+    private suspend fun dragNear(v: RescueViewModel, id: String, gap: Double) {
+        val e = v.engine
+        val target = e.targetPosition(id) ?: run { Log.i(TAG, "dragnear unknown target $id"); return }
+        val before = e.progress
+        if (!v.onEvent(RescueEvent.DragStart(DRAG))) { Log.i(TAG, "dragnear refused phase=${before.phase.id}"); return }
+        var total = V3(); var guard = 0
+        while ((e.progress.tool - target).length() > gap && guard++ < 200) {
+            val left = target - e.progress.tool
+            total = total + left * (.015 / maxOf(left.length(), 1e-9))
+            v.onEvent(RescueEvent.DragMove(DRAG, total))
+            delay(60)
+            until("arm follows", 10) { !e.moving }
+        }
+        val at = (e.progress.tool - target).length()
+        v.onEvent(RescueEvent.DragEnd(DRAG, false))
+        delay(200)
+        val worked = e.acting
+        until("work after release", 30) { !e.acting }
+        val p = e.progress
+        Log.i(TAG, "dragnear target=$id gap=${"%.3f".format(at)} executed=${worked || p.cuts != before.cuts || p.inspected != before.inspected || p.braced != before.braced || p.attached != before.attached || p.work != before.work} " +
+            "cuts=${before.cuts}->${p.cuts} inspected=${before.inspected.size}->${p.inspected.size} errors=${before.errors}->${p.errors} message=${e.message}")
+        logFocus(v, "after-dragnear")
+    }
+
+    /** Level 1 from the start to the rope step, then the wrong rope and the right rope by the joystick. */
+    private suspend fun ropeCheck(v: RescueViewModel) {
+        if (v.state.value.page in setOf("placement", "wall-preview", "table-select", "ready")) { enter(v); tap(v, "start"); delay(500) }
+        v.debugStart(0); delay(500)
+        logFocus(v, "inspect")
+        for (t in listOf("front-rope", "rear-rope", "brace-point")) operate(v, t)
+        operate(v, "brace-point")
+        logFocus(v, "cut-start")
+        dragNear(v, "rear-rope", .10)
+        dragNear(v, "front-rope", .10)
+        logFocus(v, "after-front")
+        Log.i(TAG, "ropecheck done phase=${v.engine.progress.phase.id} cuts=${v.engine.progress.cuts} errors=${v.engine.progress.errors} selected=${v.engine.selected ?: "none"}")
     }
 
     private fun tap(v: RescueViewModel, id: String) { v.onEvent(RescueEvent.Control("$id-action", contract!!)) }

@@ -89,6 +89,8 @@ class RescueViewModel(private val repository:RescueRepository, private val write
         if(id==p.campaign.mission&&p.phase!=RescuePhase.RESULT){history.clear();change{it.copy(page=p.phase.id)};active();publish();return}
         if(engine.startMission(id)){lastPhase=engine.progress.phase;history.clear();change{it.copy(page=lastPhase.id)};save();active();publish()}else message("这一关还没开放。")
     }
+    /** Debug builds only (AutoPilot): level [id] from its start, wherever the save is. */
+    fun debugStart(id:Int){if(engine.startMission(id)){lastPhase=engine.progress.phase;history.clear();change{it.copy(page=lastPhase.id)};save();active();publish()}}
     fun control(id:String,c:PanelContract){
         if(!state.value.foreground||state.value.closing)return
         if(id==BACK){back();return}
@@ -195,7 +197,8 @@ class RescueViewModel(private val repository:RescueRepository, private val write
         "ui.resultNextLabel"->CampaignUseCase.next(engine.progress.campaign)?.let{"下一关：第 ${it+1} 关 · ${CampaignUseCase.titles[it]}"}?:"全部完成"
         "ui.resultNextHidden"->CampaignUseCase.next(engine.progress.campaign)==null
         "ui.chartContinueHidden"->engine.progress.phase==RescuePhase.RESULT
-        "ui.selectionLabel"->engine.selected?.let{engine.targetName(it)}?:"尚未选中目标"
+        // v1.2.1: with nothing picked it names the next target (was 「尚未选中目标」).
+        "ui.selectionLabel"->com.vrgames.deeprescue.domain.StepFocus.nextLabel(engine.progress,engine.selected)
         "ui.surfaceLabel"->state.value.surface
         "ui.gauges"->"浮力：${engine.progress.air} / 3 · 张力：${(engine.tension*100).roundToInt()}% · 水流：${if(RescueCurrent.strength(engine.progress.elapsed)>.8)"增强"else"平缓"}"
         "ui.audioLabel"->"氛围声：${if(engine.progress.settings.music)"开"else"关"} · 操作音：${if(engine.progress.settings.sfx)"开"else"关"}"
